@@ -49,7 +49,7 @@ slurm_scripts/
 
 # Jupyter
 .ipynb_checkpoints/
-
+notebooks/
 
 # Gemini
 .geminiignore

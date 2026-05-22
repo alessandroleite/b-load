@@ -1,49 +1,98 @@
+"""
+mb_by_mb.py — MB-by-MB local causal discovery, base LOAD and b-LOAD variants.
+
+This module contains two groups of functions:
+
+1. **LOAD (base)** — adapted from Shubert et al.'s public implementation of the
+   MB-by-MB algorithm for local causal structure learning:
+       https://github.com/[shubert-et-al-repo]
+   Functions: ``find_unshielded_triples``, ``v_struc_pc``, ``skeleton_step``,
+   ``get_locally_valid_parent_sets``, ``grow_shrink``, ``total_conditioning``,
+   ``learn_local_structure``, ``copy_local_structure``, ``update_graph``,
+   ``meek``, ``reach_with_undirected``, ``mb_by_mb_alg``.
+
+2. **b-LOAD** — extensions of the above that incorporate background knowledge
+   into the MB-by-MB loop so that the resulting graph is an MPDAG consistent
+   with the provided prior edge constraints.  These functions are part of the
+   b-LOAD algorithm introduced in this work:
+   ``update_graph_mpdag``, ``meek_mpdag``, ``mb_by_mb_in_mpdag_alg``.
+
+Graph encoding (shared throughout this module)
+----------------------------------------------
+``g[i, j] == -1``  →  tail of an edge at i  (i — j or i → j)
+``g[i, j] ==  1``  →  head of an edge at i  (j — i or j → i)
+``g[i, j] ==  0``  →  no edge between i and j
+
+An undirected edge i — j satisfies  g[i,j] == g[j,i] == -1.
+A directed edge  i → j satisfies    g[i,j] == -1  and  g[j,i] == 1.
+"""
+
 from collections import defaultdict
 from itertools import chain, combinations
 from typing import Callable, Sequence
 
 import numpy as np
 
-## Original version
+
+# ---------------------------------------------------------------------------
+# LOAD (base) — adapted from Shubert et al.
+# ---------------------------------------------------------------------------
+
 
 def find_unshielded_triples(g: np.ndarray) -> np.ndarray:
     """
-    Find all unshielded triples in the skeleton in a vectorized way.
+    Find all unshielded triples (i, j, k) in the skeleton in a vectorised way.
+
+    An unshielded triple is a path i — j — k where i and k are *not* adjacent.
+    These are the candidates for v-structure (collider) orientation.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        g (np.ndarray): The skeleton.
+        g (np.ndarray): Skeleton adjacency matrix  (non-zero ↔ edge present).
 
     Returns:
-        np.ndarray: The unshielded triples.
+        np.ndarray: Array of shape (M, 3) whose rows are (i, j, k) triples with
+            i < k (each unshielded triple appears exactly once).
     """
     i, j = np.where(g != 0)  # i - j
     k = np.where((g[j] != 0) & (g[i] == 0))  # j - k -/- i
-    # Extract actual indices
     i, j, k = i[k[0]], j[k[0]], k[1]
-    # Ensure no duplicates
     mask = i < k
     return np.column_stack((i[mask], j[mask], k[mask]))
+
 
 def v_struc_pc(
     skeleton: np.ndarray, sep_set: dict[frozenset, list], bidirected: bool = False
 ) -> np.ndarray:
     """
-    Orient v-structures in the skeleton as in the PC algorithm
+    Orient v-structures (unshielded colliders) in the skeleton following the
+    PC-algorithm criterion: for each unshielded triple i — j — k, orient
+    i → j ← k if and only if j is *not* in any separating set of i and k.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        skeleton (np.ndarray): The skeleton to orient.
-        sep_set (dict[frozenset, list]): The separating sets.
-        bidirected (bool): Whether to orient conflicts as bidirected, or overwrite.
+        skeleton (np.ndarray): Undirected skeleton adjacency matrix.
+        sep_set (dict[frozenset, list]): Separating sets recorded during the
+            skeleton search; ``sep_set[frozenset({i, k})]`` is a list of
+            conditioning sets that d-separated i and k.
+        bidirected (bool): If ``True``, conflicting orientations (two colliders
+            sharing an edge) are left as bidirected rather than overwritten.
+            Default is ``False`` (last-writer wins).
 
     Returns:
-        np.ndarray: The PDAG.
+        np.ndarray: PDAG with v-structures oriented; all remaining edges are
+            still encoded as undirected (g[i,j] == g[j,i] == -1).
     """
     pdag = skeleton.copy()
     for x, y, z in find_unshielded_triples(skeleton):
         if all(y not in S for S in sep_set[frozenset((x, z))]):
-            pdag[y, x] = pdag[y, z] = 1  # Orient arrowhead
+            pdag[y, x] = pdag[y, z] = 1  # arrowhead into y
             if not bidirected:
-                pdag[x, y] = pdag[z, y] = -1  # Orient tail
+                pdag[x, y] = pdag[z, y] = -1  # tails out of x and z
     return pdag
 
 
@@ -55,17 +104,27 @@ def skeleton_step(
     sep_set: dict[frozenset, list],
 ) -> np.ndarray:
     """
-    Skeleton step at a given order
+    Perform one round of skeleton pruning at a given conditioning-set size.
+
+    For every adjacent pair (x, y) in ``g``, iterate over all subsets of
+    size ``order`` drawn from x's current neighbours (excluding y) and remove
+    the edge x — y as soon as a d-separating set is found.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        order (int): The order of CI tests.´
-        g (np.ndarray): The current skeleton.
-        ci_test (Callable[[int, int, list[int]], float]): CI test taking x, y and a conditioning set, and returns a p-value.
-        alpha (float): Significance level.
-        sep_set (dict[frozenset, list]): The separating sets.
+        order (int): Size of the conditioning sets to test (0, 1, 2, …).
+        g (np.ndarray): Current skeleton (modified **in place** and returned).
+        ci_test (Callable[[int, int, list[int]], float]): Conditional
+            independence test; returns a p-value given (X, Y, conditioning_set).
+        alpha (float): Significance level — edges whose p-value ≥ alpha are
+            removed from the skeleton.
+        sep_set (dict[frozenset, list]): Accumulates the separating sets found;
+            updated in place when an edge is removed.
 
     Returns:
-        np.ndarray: The updated (in-place) skeleton.
+        np.ndarray: Updated skeleton (same object as the input ``g``).
     """
     for x in range(len(g)):
         Neigh_x = np.where(g[x, :] != 0)[0]
@@ -84,17 +143,29 @@ def skeleton_step(
 
 def get_locally_valid_parent_sets(g: np.ndarray, x: int) -> Sequence[set[int]]:
     """
-    Get all locally valid parent sets for a given node in the graph, following
-    the local IDA algorithm (Algorithm 3) in
-    Estimating high-dimensional intervention effects from observational data
-    by Marloes H. Maathuis, Markus Kalisch and Peter Bühlmann
+    Enumerate all locally valid parent sets of node ``x`` in the local CPDAG ``g``.
+
+    A parent set is *locally valid* if it does not introduce a new v-structure
+    relative to the skeleton — i.e., every undirected neighbour promoted to a
+    parent must itself be adjacent to every other candidate parent.
+
+    This implements Algorithm 3 from:
+        Maathuis, Kalisch & Bühlmann (2009). "Estimating high-dimensional
+        intervention effects from observational data." *Annals of Statistics*.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        g (np.ndarray): The local graph of x.
-        x (int): The target node.
+        g (np.ndarray): Local graph (adjacency matrix) containing node ``x``
+            and its neighbourhood.
+        x (int): Index of the target node within ``g``.
 
     Returns:
-        Sequence[set[int]]: The locally valid parent sets.
+        Sequence[set[int]]: List of valid parent sets (each a set of node
+            indices).  Every combination of undirected neighbours of ``x``
+            that can be oriented as parents without creating a new collider is
+            included.
     """
     parents = set(np.where((g[x] == 1) & (g[:, x] == -1))[0])
     unoriented = set(np.where((g[x] == -1) & (g[:, x] == -1))[0])
@@ -102,13 +173,10 @@ def get_locally_valid_parent_sets(g: np.ndarray, x: int) -> Sequence[set[int]]:
     np.fill_diagonal(skeleton, True)
 
     valid_sets = []
-    # for each subset of unoriented neighbors of x
     for new_parents in chain.from_iterable(
         combinations(unoriented, r) for r in range(len(unoriented) + 1)
     ):
         candidate_set = parents.union(new_parents)
-        # Check if the candidate set is locally valid, i.e., has no NEW v-structure
-        # by checking if all NEW parents are neighbours of all current parents
         if np.all(skeleton[new_parents, :][:, list(candidate_set)]):
             valid_sets.append(candidate_set)
     return valid_sets
@@ -121,19 +189,35 @@ def grow_shrink(
     alpha: float,
 ) -> set:
     """
-    Find the Markov blanket of a target node in a graph using the Grow-Shrink algorithm.
-    Adapted from https://github.com/acmi-lab/local-causal-discovery.
+    Estimate the Markov blanket of ``target`` using the Grow-Shrink (GS)
+    algorithm.
+
+    The GS algorithm operates in two passes:
+
+    * **Grow**: iteratively add nodes that are conditionally dependent on
+      ``target`` given the current blanket.
+    * **Shrink**: remove nodes that become conditionally independent of
+      ``target`` given the full blanket.
+
+    Adapted from: https://github.com/acmi-lab/local-causal-discovery
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        nodes (set): All nodes.
-        target (int): Target node for which to find the Markov blanket.
-        ci_test (Callable[[int, int, list[int]], float]): CI test taking x, y and a conditioning set, and returns a p-value.
-        alpha (float): Significance level for the CI test.
+        nodes (set): Full node set to search over.
+        target (int): Node whose Markov blanket is to be estimated.
+        ci_test (Callable[[int, int, list[int]], float]): CI test returning a
+            p-value given (X, Y, conditioning_set).
+        alpha (float): Significance level for CI tests.
+
     Returns:
-        set: The Markov blanket of the target node.
+        set: Estimated Markov blanket of ``target`` (does not include
+            ``target`` itself).
     """
     mb = set()
-    # Forward pass
+
+    # Grow phase
     cont = True
     while cont:
         cont = False
@@ -144,7 +228,7 @@ def grow_shrink(
                 mb.add(n)
                 cont = True
 
-    # Backward pass
+    # Shrink phase
     mb_copy = set(mb)
     for n in mb_copy:
         if ci_test(n, target, mb - {n}) >= alpha:
@@ -160,17 +244,30 @@ def total_conditioning(
     alpha: float,
 ) -> set:
     """
-    Find the Markov blanket of a target node in a graph using the Total Conditioning algorithm
-    from Using markov blankets for causal structure learning by
-    Jean-Philippe Pellet and André Elisseeff.
+    Estimate the Markov blanket of ``target`` using the Total Conditioning (TC)
+    algorithm.
+
+    Every node in ``nodes`` is tested for independence of ``target`` given
+    *all other* nodes simultaneously.  Nodes that remain dependent are
+    included in the blanket.
+
+    Reference:
+        Pellet & Elisseeff (2008). "Using Markov blankets for causal structure
+        learning." *Journal of Machine Learning Research*.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        nodes (set): All nodes.
-        target (int): Target node for which to find the Markov blanket.
-        ci_test (Callable[[int, int, list[int]], float]): CI test taking x, y and a conditioning set, and returns a p-value.
-        alpha (float): Significance level for the CI test.
+        nodes (set): Full node set to search over.
+        target (int): Node whose Markov blanket is to be estimated.
+        ci_test (Callable[[int, int, list[int]], float]): CI test returning a
+            p-value given (X, Y, conditioning_set).
+        alpha (float): Significance level for CI tests.
+
     Returns:
-        set: The Markov blanket of the target node.
+        set: Estimated Markov blanket of ``target`` (does not include
+            ``target`` itself).
     """
     mb = set()
     for n in nodes - {target}:
@@ -187,44 +284,65 @@ def learn_local_structure(
     alpha: float,
 ) -> np.ndarray:
     """
-    Learn the local structure over a set of observed nodes using the PC algorithm.
+    Learn the local PDAG over ``observed`` nodes using a PC-style skeleton
+    search followed by v-structure orientation.
+
+    Only nodes in ``observed`` participate in the skeleton search; all other
+    nodes in ``nodes`` are treated as absent (their rows/columns are zeroed
+    out at initialisation).  The resulting PDAG is bidirected-safe: when two
+    v-structure orientations conflict on the same edge, the edge is left
+    bidirected rather than overwritten.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        nodes (set): All nodes.
-        observed (set): The observed nodes.
-        sep_set (dict[frozenset, list]): The separating sets.
-        ci_test (Callable[[int, int, list[int]], float]): CI test taking x, y and a conditioning set, and returns a p-value.
-        alpha (float): Significance level for the CI test.
+        nodes (set): Complete variable set (used for index space).
+        observed (set): Subset of nodes over which to learn the structure
+            (typically mb⁺(x) for some target x).
+        sep_set (dict[frozenset, list]): Separating sets — updated in place.
+        ci_test (Callable[[int, int, list[int]], float]): CI test returning a
+            p-value.
+        alpha (float): Significance level.
+
     Returns:
-        np.ndarray: The adjacency matrix of the learned local structure.
+        np.ndarray: PDAG adjacency matrix of size ``len(nodes) × len(nodes)``.
+            Only entries corresponding to ``observed`` nodes are meaningful;
+            all others are zero.
     """
-    # Initialization
     g = np.full((len(nodes), len(nodes)), -1, dtype=int)
     np.fill_diagonal(g, 0)
     ignore = list(nodes.difference(observed))
     g[ignore, :] = g[:, ignore] = 0
 
-    # Skeleton search
     order = 0
     while np.amax(np.sum(g != 0, axis=1)) > order:
         g = skeleton_step(order, g, ci_test, alpha, sep_set)
         order += 1
-    # Orient v-structures
-    g = v_struc_pc(g, sep_set, bidirected=True)
 
+    g = v_struc_pc(g, sep_set, bidirected=True)
     return g
 
 
 def copy_local_structure(g: np.ndarray, observed: set) -> np.ndarray:
     """
-    Create a copy of the local structure over the observed nodes.
+    Extract the sub-graph of ``g`` induced by ``observed`` into a zero-padded
+    array of the same shape.
+
+    Used in the MB-by-MB algorithm when the local structure of a new node can
+    be derived from an already-computed local structure (because its
+    neighbourhood is a subset of one that was already fully learned).
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        g (np.ndarray): The input graph.
-        observed (set): The observed nodes.
+        g (np.ndarray): Source graph (full node-index space).
+        observed (set): Node indices whose mutual edges should be copied.
 
     Returns:
-        np.ndarray: A copy of the local structure.
+        np.ndarray: Array of the same shape as ``g`` with only the
+            ``observed × observed`` block copied; all other entries are zero.
     """
     local = np.zeros_like(g, dtype=int)
     observed = list(observed)
@@ -234,19 +352,33 @@ def copy_local_structure(g: np.ndarray, observed: set) -> np.ndarray:
 
 def update_graph(g: np.ndarray, target: int, local: np.ndarray) -> np.ndarray:
     """
-    Update the graph with the local structure around the target node.
+    Merge the local structure ``local`` for ``target`` into the global graph
+    ``g``.
+
+    Two classes of information are written into ``g``:
+
+    1. **All edges incident on ``target``**: the entire row and column of
+       ``target`` in ``g`` are replaced by those from ``local``.
+    2. **V-structures where ``target`` is a parent**: for each collider
+       ``coll`` into which ``target`` points, the edge ``spouse → coll``
+       (for every other parent ``spouse`` of ``coll`` in ``local``) is also
+       propagated.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        g (np.ndarray): The global graph.
-        target (int): The target node.
-        local (np.ndarray): Local structure for the target node.
+        g (np.ndarray): Global graph to update (modified in place).
+        target (int): Node whose local neighbourhood is being merged.
+        local (np.ndarray): Local PDAG over ``mb⁺(target)`` (same index
+            space as ``g``).
+
     Returns:
-        np.ndarray: The updated global graph.
+        np.ndarray: Updated ``g`` (same object).
     """
-    # Put the edges connected to target in local to g
     g[target, :] = local[target, :]
     g[:, target] = local[:, target]
-    # Put v-structures containing target as a parent in local to g.
+
     coll = np.where(local.T[target] == 1)[0]  # target *-> coll
     spouse = np.where((local[coll] == 1) & (local[target] == 0))
     coll, spouse = coll[spouse[0]], spouse[1]
@@ -262,86 +394,94 @@ def update_graph(g: np.ndarray, target: int, local: np.ndarray) -> np.ndarray:
 
 def meek(g: np.ndarray, sep_set: dict[frozenset, list]) -> np.ndarray:
     """
-    Orient the undirected edges in g by a revision of Meek's approach,
-    as described in the MB-by-MB algorithm.
+    Propagate edge orientations in ``g`` using a sep-set-aware revision of
+    Meek's rules, as specified in the MB-by-MB algorithm.
+
+    Three rules are applied exhaustively (until no further change occurs):
+
+    * **R1** — ``a → b — c`` and b ∈ Sep(a, c)  ⟹  orient ``b → c``
+      (b is a non-collider between a and c, so it cannot point into c).
+    * **R2** — ``a → b → c — a``  ⟹  orient ``a → c``
+      (acyclicity: orienting ``c → a`` would create a directed cycle).
+    * **R3** — ``a — c — b``, ``a — d — b``, c ↛ d, a ∈ Sep(c, d),
+      ``c → b``, ``d → b``  ⟹  orient ``a → b``
+      (unique non-collider path).
+
+    Unlike the standard Meek rules (which operate on graph structure alone),
+    R1 and R3 here additionally consult the ``sep_set`` recorded during the
+    skeleton search.  This is the variant used in the original LOAD /
+    MB-by-MB paper.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        g (np.ndarray): The graph to orient.
-        sep_set (dict[frozenset, list]): The separating sets.
+        g (np.ndarray): Partially directed graph to orient (copied
+            internally; the input is not mutated).
+        sep_set (dict[frozenset, list]): Separating sets from the skeleton
+            search; ``sep_set[frozenset({i, k})]`` is the list of
+            conditioning sets that d-separated i and k.
+
     Returns:
-        np.ndarray: The oriented graph.
+        np.ndarray: Graph with all propagatable orientations resolved.
     """
 
     def rule1(g: np.ndarray, sep_set: dict[frozenset, list]) -> bool:
         """
-        For (a -> b - c) in g,
-        if g.sepset[a, c] exists and b in g.sepset[a, c], orient b -> c.
-
-        Args:
-            g (np.ndarray): The graph to orient.
-        Returns:
-            bool: Whether the graph was changed.
+        R1: a → b — c, b ∈ Sep(a, c)  ⟹  b → c.
+        b being in the sep-set certifies it is a non-collider, so it must
+        have a tail toward c.
         """
         a, b = np.where((g == -1) & (g.T == 1))  # a -> b
-        c = np.where(((g[b] == -1) & (g.T[b] == -1)) & (g[a] == 0))  # b - c  # a -/- c
-        # Extract actual indices
+        c = np.where(((g[b] == -1) & (g.T[b] == -1)) & (g[a] == 0))  # b - c, a -/- c
         a, b, c = a[c[0]], b[c[0]], c[1]
-        # Orient as b -> c
         changed = False
         for a_, b_, c_ in zip(a, b, c):
             if frozenset((a_, c_)) in sep_set and all(
                 b_ in S for S in sep_set[frozenset((a_, c_))]
             ):
-                g[c_, b_] = 1
+                g[c_, b_] = 1  # b -> c
                 changed = True
-
         return changed
 
     def rule2(g: np.ndarray) -> bool:
         """
-        For (a -> b -> c - a) in g, orient a -> c.
-        Args:
-            g (np.ndarray): The graph to orient.
-        Returns:
-            bool: Whether the graph was changed.
+        R2: a → b → c — a  ⟹  a → c.
+        Orienting c → a would close a directed cycle a → b → c → a.
         """
         a, b = np.where((g == -1) & (g.T == 1))  # a -> b
         c = np.where(
-            ((g[b] == -1) & (g.T[b] == 1))  # b -> c
-            & ((g[a] == -1) & (g.T[a] == -1))  # a - c
+            ((g[b] == -1) & (g.T[b] == 1))    # b -> c
+            & ((g[a] == -1) & (g.T[a] == -1)) # a - c
         )
-        # Extract actual indices
         a, b, c = a[c[0]], b[c[0]], c[1]
-        # Orient as a -> c
-        g[c, a] = 1
-        # return whether graph changed
+        g[c, a] = 1  # a -> c
         return len(a) > 0
 
     def rule3(g: np.ndarray, sep_set: dict[frozenset, list]) -> bool:
         """
-        For a - b, a - c -> b and a - d -> b in g,
-        if g.sepset[c, d] exists and a in g.sepset[c, d], orient a -> b.
+        R3: a — c, a — d, c -/- d, a ∈ Sep(c, d), c → b, d → b, a — b
+            ⟹  a → b.
+        a being in Sep(c,d) means it is a non-collider between c and d,
+        so the only consistent orientation of a — b is a → b.
         """
         a, c = np.where((g == -1) & (g.T == -1))  # a - c
-        d = np.where(((g[a] == -1) & (g.T[a] == -1)) & (g[c] == 0))  # a - d -/- c
-        # Extract actual indices
+        d = np.where(((g[a] == -1) & (g.T[a] == -1)) & (g[c] == 0))  # a - d, c -/- d
         a, c, d = a[d[0]], c[d[0]], d[1]
         mask = c < d
         a, c, d = a[mask], c[mask], d[mask]
         b = np.where(
-            ((g[a] == -1) & (g.T[a] == -1))  # a - b
+            ((g[a] == -1) & (g.T[a] == -1))   # a - b
             & ((g[c] == -1) & (g.T[c] == 1))  # c -> b
             & ((g[d] == -1) & (g.T[d] == 1))  # d -> b
         )
-        # Extract actual indices
         a, c, d, b = a[b[0]], c[b[0]], d[b[0]], b[1]
-        # Orient as i -> l
         changed = False
         for a_, b_, c_, d_ in zip(a, b, c, d):
             if frozenset((c_, d_)) in sep_set and all(
                 a_ in S for S in sep_set[frozenset((c_, d_))]
             ):
-                g[b_, a_] = 1
+                g[b_, a_] = 1  # a -> b
                 changed = True
         return changed
 
@@ -353,20 +493,35 @@ def meek(g: np.ndarray, sep_set: dict[frozenset, list]) -> np.ndarray:
 
 def reach_with_undirected(g: np.ndarray, target: int) -> np.ndarray:
     """
-    Find all nodes that can reach the target node with an undirected path.
+    Return all nodes that are connected to ``target`` via a path consisting
+    entirely of **undirected** edges.
+
+    This is used in the MB-by-MB loop to prune the wait-list: once a node
+    can only reach ``target`` through a chain of directed edges, its local
+    structure cannot change the orientation of edges incident on ``target``,
+    so it is safe to drop from further processing.
+
+    Implementation: the undirected adjacency matrix is raised to the
+    (n − 1)-th power; any non-zero entry in ``target``'s row indicates
+    reachability.
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
+
     Args:
-        g (np.ndarray): The partially directed graph.
-        target (int): The target node.
+        g (np.ndarray): Partially directed graph.
+        target (int): The node to measure reachability toward.
+
     Returns:
-        np.ndarray: An array of nodes that can reach the target node with an undirected path
+        np.ndarray: 1-D array of node indices that can reach ``target``
+            via undirected edges (``target`` itself is excluded).
     """
     undir = (g == -1) & (g.T == -1)
     np.fill_diagonal(undir, 1)
     reach = np.linalg.matrix_power(undir, undir.shape[0] - 1)
     mask = reach[target] != 0
     mask[target] = False
-    nodes = np.where(mask)[0]
-    return nodes
+    return np.where(mask)[0]
 
 
 def mb_by_mb_alg(
@@ -381,22 +536,49 @@ def mb_by_mb_alg(
     ignore: Sequence[int] = [],
 ) -> np.ndarray:
     """
-    MB-by-MB algorithm for learning the local network around a target node.
+    MB-by-MB algorithm for learning the local causal network around ``target``.
+
+    The algorithm expands outward from ``target`` one Markov blanket at a time,
+    learning a local PDAG for each node encountered, merging it into a growing
+    global graph ``g``, propagating orientations with Meek rules, and pruning
+    the work-list of nodes whose connection to ``target`` is already fully
+    directed.
+
+    High-level steps (repeated until the wait-list is empty):
+
+    1. Pop node ``x`` from the wait-list.
+    2. Compute mb(x) with the chosen MB algorithm.
+    3. Learn ``L[x]``, the local PDAG over mb⁺(x), reusing previously
+       computed structures where possible.
+    4. Merge ``L[x]`` into ``g`` via :func:`update_graph`.
+    5. Propagate orientations with :func:`meek`.
+    6. Prune the wait-list to nodes still reachable from ``target`` via
+       undirected paths (:func:`reach_with_undirected`).
+
+    .. note::
+        Adapted from Shubert et al.'s LOAD implementation.
 
     Args:
-        data (np.ndarray): The data matrix.
-        ci_test (Callable[[int, int, list[int]], float]): CI test taking x, y and a conditioning set, and returns a p-value.
-        alpha (float): Significance level.
-        target (int): The target node for which to learn the local network.
-        mb_algorithm (str): The algorithm to use for finding the Markov blanket.
-        mb (dict[int, set]): Pre-computed Markov blankets of nodes.
-        L (dict[int, np.ndarray]): Pre-computed local structures of nodes.
-        sep_set (dict[frozenset, list]): Pre-computed separating sets.
-        ignore (Sequence[int]): Nodes to ignore in discovery process.
+        data (np.ndarray): Data matrix of shape (n_samples, n_nodes).
+        ci_test (Callable[[int, int, list[int]], float]): CI test returning a
+            p-value given (X, Y, conditioning_set).
+        alpha (float): Significance level for CI tests.
+        target (int): Index of the node whose local network is to be learned.
+        mb_algorithm (str): MB discovery algorithm — ``"grow_shrink"`` (default)
+            or ``"total_conditioning"``.
+        mb (dict[int, set] | None): Pre-computed Markov blankets; updated in
+            place and reused across calls.
+        L (dict[int, np.ndarray] | None): Pre-computed local structures;
+            updated in place.
+        sep_set (dict[frozenset, list] | None): Pre-computed separating sets;
+            updated in place.
+        ignore (Sequence[int]): Node indices to exclude from all MB searches
+            (e.g. intervention targets).
+
     Returns:
-        np.ndarray: The learned local network around the target node.
+        np.ndarray: Learned local PDAG ``g`` of shape (n_nodes, n_nodes),
+            focused on the neighbourhood of ``target``.
     """
-    # Input
     if mb_algorithm == "grow_shrink":
         mb_algorithm = grow_shrink
     elif mb_algorithm == "total_conditioning":
@@ -409,75 +591,93 @@ def mb_by_mb_alg(
     sep_set = sep_set or defaultdict(list)
     V = set(range(data.shape[1]))
 
-    # 1. Initialization
-    # Nodes whose MBs have been found
     done_list = set()
-    # Nodes whose MBs will be found
     wait_list = [target]
-    # The constructed local network around target
-    # with -1 for edge tail, 1 for edge head, and 0 for no edge
     g = np.zeros((len(V), len(V)), dtype=int)
 
-    # 2. Repeat
-    while len(wait_list) > 0:  # 7. Until wait_list is empty
-        # Take a node x from the head of wait_list
+    while len(wait_list) > 0:
         x = wait_list.pop(0)
-        # Find mb[x]
+
         if x not in mb:
             mb[x] = mb_algorithm(V.difference(set(ignore)), x, ci_test, alpha)
         mb_x = mb[x].union({x})
-        # Add [mb[x] \ done_list \ wait_list] to the tail of wait_list
+
         wait_list.extend([v for v in mb[x] if v not in list(done_list) + wait_list])
-        # Add x to done_list
         done_list.add(x)
 
-        # 3. Learn the local structure L[x] over mb+(x)
-        # If L[x] is already learned, skip
         if x in L:
             pass
-        # If mb+(x) is a subset of mb+(n) for some n in done_list
         elif (
             n := next((n for n in done_list if n != x and mb_x < mb[n] | {n}), None)
         ) is not None:
-            # Set L[x] equal to the substructure of L[n] over mb+(x)
             L[x] = copy_local_structure(L[n], mb_x)
-        # Else If mb(x) is a subset of done_list
         elif mb[x] < done_list:
-            # Set L[x] equal to the substructure of g over mb+(x)
             L[x] = copy_local_structure(g, mb_x)
         else:
-            # learn L[x] from observed data of mb[x]+
             L[x] = learn_local_structure(V, mb_x, sep_set, ci_test, alpha)
 
-        # 4. Put the edges connected to x and the v-structures containing x in L[x] to g
         g = update_graph(g, x, L[x])
-        # 5. Orient undirected edges in G
         g = meek(g, sep_set)
 
-        # 6. Remove all nodes from wait_list whose paths to target in g are blocked by directed edges.
         connected = reach_with_undirected(g, target)
         wait_list = [w for w in wait_list if w in connected]
 
-    # Output: the local network g around the target
     return g
 
-## LOAD in MPDAG version
 
-# (Assume find_unshielded_triples, v_struc_pc, skeleton_step, get_locally_valid_parent_sets,
-# grow_shrink, total_conditioning, learn_local_structure, copy_local_structure,
-# and reach_with_undirected are defined exactly as in your original snippet)
+# ---------------------------------------------------------------------------
+# b-LOAD — background-knowledge extensions (part of the b-LOAD algorithm)
+# ---------------------------------------------------------------------------
 
 
-def update_graph_mpdag(g: np.ndarray, target: int, local: np.ndarray, background_knowledge: np.ndarray | None = None) -> np.ndarray:
+def update_graph_mpdag(
+    g: np.ndarray,
+    target: int,
+    local: np.ndarray,
+    background_knowledge: np.ndarray | None = None,
+) -> np.ndarray:
     """
-    Update the graph with the local structure around the target node,
-    while protecting strictly known edges from background knowledge.
+    Merge the local structure ``local`` for ``target`` into the global MPDAG
+    ``g``, then re-stamp any required background-knowledge edges that the
+    merge may have overwritten.
+
+    This is the **b-LOAD** counterpart of :func:`update_graph`.  The only
+    addition is step 3: after writing all local information into ``g``, the
+    background-knowledge matrix is applied as a mask so that required edges
+    are never erased by statistical CI-test errors.
+
+    The merge itself follows the same two-phase logic as :func:`update_graph`:
+
+    1. Overwrite the row and column of ``target`` in ``g`` with the
+       corresponding entries from ``local`` (atomic overwrite — this prevents
+       stale-edge cycles within mb⁺(target)).
+    2. Propagate v-structures in which ``target`` acts as a parent.
+    3. Re-enforce background knowledge: any position where
+       ``background_knowledge[i, j] ≠ 0`` is forced back to its prescribed
+       value.
+
+    .. note::
+        Part of the **b-LOAD** algorithm introduced in this work.
+
+    Args:
+        g (np.ndarray): Global MPDAG to update (modified in place).
+        target (int): Node whose local neighbourhood is being merged.
+        local (np.ndarray): Local PDAG over mb⁺(target) (same index space
+            as ``g``).
+        background_knowledge (np.ndarray | None): Prior edge constraints
+            encoded in the standard adjacency format
+            (``bk[i,j] == -1`` and ``bk[j,i] == 1``  ↔  required edge i→j).
+            If ``None``, the function behaves identically to
+            :func:`update_graph`.
+
+    Returns:
+        np.ndarray: Updated ``g`` (same object).
     """
-    # 1. Put the edges connected to target in local to g
+    # 1. Atomic row + column overwrite for target
     g[target, :] = local[target, :]
     g[:, target] = local[:, target]
 
-    # 2. Put v-structures containing target as a parent in local to g.
+    # 2. Propagate v-structures where target is a parent
     coll = np.where(local.T[target] == 1)[0]  # target *-> coll
     spouse = np.where((local[coll] == 1) & (local[target] == 0))
     coll, spouse = coll[spouse[0]], spouse[1]
@@ -488,8 +688,7 @@ def update_graph_mpdag(g: np.ndarray, target: int, local: np.ndarray, background
     g[spouse, coll] = local[spouse, coll]
     g[coll, spouse] = local[coll, spouse]
 
-    # 3. ENFORCE BACKGROUND KNOWLEDGE
-    # Ensure PC algorithm's statistical errors don't delete required known edges
+    # 3. Re-enforce background knowledge
     if background_knowledge is not None:
         mask = background_knowledge != 0
         g[mask] = background_knowledge[mask]
@@ -499,55 +698,114 @@ def update_graph_mpdag(g: np.ndarray, target: int, local: np.ndarray, background
 
 def meek_mpdag(g: np.ndarray, sep_set: dict[frozenset, list]) -> np.ndarray:
     """
-    Orient the undirected edges in g by a revision of Meek's approach
-    specifically tailored for MPDAGs, using the 4 rules.
+    Propagate edge orientations in an MPDAG using a four-rule sep-set-aware
+    revision of Meek's rules.
+
+    Rules R1–R3 are identical to those in :func:`meek` (the LOAD base version).
+    Rule R4 is an additional orientation rule needed when background knowledge
+    has introduced directed edges that cannot be explained by v-structures
+    alone:
+
+    * **R4** — ``a — b``, ``a — c`` (undirected), ``b → c``,
+      ``a — d`` (undirected), ``d → c``, b -/- d,
+      and a ∈ Sep(b, d)  ⟹  orient ``a → b``.
+      (a being in Sep(b,d) certifies it is not a collider on b — a — d,
+      so a → b is the only orientation that avoids a new unshielded collider.)
+
+    This four-rule variant is required for the b-LOAD / b-PC setting where
+    injected background-knowledge edges may create orientations that the
+    three structural rules alone cannot propagate.
+
+    .. note::
+        Part of the **b-LOAD** algorithm introduced in this work.
+
+    Args:
+        g (np.ndarray): Partially directed MPDAG to orient (copied internally;
+            the input is not mutated).
+        sep_set (dict[frozenset, list]): Separating sets from the skeleton
+            search, used by R1, R3, and R4.
+
+    Returns:
+        np.ndarray: Graph with all propagatable orientations resolved under
+            the four rules.
     """
+
     def rule1(g, sep_set):
+        """R1: a → b — c, b ∈ Sep(a,c)  ⟹  b → c."""
         a, b = np.where((g == -1) & (g.T == 1))
         c = np.where(((g[b] == -1) & (g.T[b] == -1)) & (g[a] == 0))
         a, b, c = a[c[0]], b[c[0]], c[1]
         changed = False
         for a_, b_, c_ in zip(a, b, c):
-            if frozenset((a_, c_)) in sep_set and all(b_ in S for S in sep_set[frozenset((a_, c_))]):
-                g[c_, b_] = 1 # b -> c
+            if frozenset((a_, c_)) in sep_set and all(
+                b_ in S for S in sep_set[frozenset((a_, c_))]
+            ):
+                g[c_, b_] = 1  # b -> c
                 changed = True
         return changed
 
     def rule2(g):
+        """R2: a → b → c — a  ⟹  a → c  (acyclicity)."""
         a, b = np.where((g == -1) & (g.T == 1))
-        c = np.where(((g[b] == -1) & (g.T[b] == 1)) & ((g[a] == -1) & (g.T[a] == -1)))
+        c = np.where(
+            ((g[b] == -1) & (g.T[b] == 1))
+            & ((g[a] == -1) & (g.T[a] == -1))
+        )
         a, b, c = a[c[0]], b[c[0]], c[1]
-        g[c, a] = 1 # a -> c
+        g[c, a] = 1  # a -> c
         return len(a) > 0
 
     def rule3(g, sep_set):
+        """R3: a — c, a — d, c -/- d, a ∈ Sep(c,d), c → b, d → b, a — b  ⟹  a → b."""
         a, c = np.where((g == -1) & (g.T == -1))
         d = np.where(((g[a] == -1) & (g.T[a] == -1)) & (g[c] == 0))
         a, c, d = a[d[0]], c[d[0]], d[1]
         mask = c < d
         a, c, d = a[mask], c[mask], d[mask]
-        b = np.where(((g[a] == -1) & (g.T[a] == -1)) & ((g[c] == -1) & (g.T[c] == 1)) & ((g[d] == -1) & (g.T[d] == 1)))
+        b = np.where(
+            ((g[a] == -1) & (g.T[a] == -1))
+            & ((g[c] == -1) & (g.T[c] == 1))
+            & ((g[d] == -1) & (g.T[d] == 1))
+        )
         a, c, d, b = a[b[0]], c[b[0]], d[b[0]], b[1]
         changed = False
         for a_, b_, c_, d_ in zip(a, b, c, d):
-            if frozenset((c_, d_)) in sep_set and all(a_ in S for S in sep_set[frozenset((c_, d_))]):
-                g[b_, a_] = 1 # a -> b
+            if frozenset((c_, d_)) in sep_set and all(
+                a_ in S for S in sep_set[frozenset((c_, d_))]
+            ):
+                g[b_, a_] = 1  # a -> b
                 changed = True
         return changed
 
     def rule4(g, sep_set):
+        """
+        R4: a — b, a — c (undir), b → c, a — d (undir), d → c, b -/- d,
+            a ∈ Sep(b,d)  ⟹  a → b.
+        This rule handles orientations introduced by background-knowledge
+        edges that are not discoverable from graph structure alone.
+        """
         a, b = np.where((g == -1) & (g.T == -1))
         changed = False
         for a_, b_ in zip(a, b):
-            c_list = np.where(((g[a_] == -1) & (g.T[a_] == -1)) & ((g[b_] == -1) & (g.T[b_] == 1)))[0]
+            c_list = np.where(
+                ((g[a_] == -1) & (g.T[a_] == -1))   # a - c
+                & ((g[b_] == -1) & (g.T[b_] == 1))  # b -> c
+            )[0]
             for c_ in c_list:
-                d_list = np.where(((g[a_] == -1) & (g.T[a_] == -1)) & ((g[c_] == -1) & (g.T[c_] == 1)) & (g[b_] == 0))[0]
+                d_list = np.where(
+                    ((g[a_] == -1) & (g.T[a_] == -1))   # a - d
+                    & ((g[c_] == -1) & (g.T[c_] == 1))  # d -> c
+                    & (g[b_] == 0)                        # b -/- d
+                )[0]
                 for d_ in d_list:
-                    if frozenset((b_, d_)) in sep_set and all(a_ in S for S in sep_set[frozenset((b_, d_))]):
-                        g[b_, a_] = 1 # a -> b
+                    if frozenset((b_, d_)) in sep_set and all(
+                        a_ in S for S in sep_set[frozenset((b_, d_))]
+                    ):
+                        g[b_, a_] = 1  # a -> b
                         changed = True
                         break
-                if changed: break
+                if changed:
+                    break
         return changed
 
     g = g.copy()
@@ -569,10 +827,53 @@ def mb_by_mb_in_mpdag_alg(
     ignore: Sequence[int] = [],
 ) -> np.ndarray:
     """
-    MB-by-MB algorithm for learning the local network around a target node,
-    adapted for MPDAGs using background knowledge.
+    b-LOAD variant of the MB-by-MB algorithm that incorporates background
+    knowledge to produce a local MPDAG around ``target``.
+
+    This function extends :func:`mb_by_mb_alg` with three adaptations:
+
+    1. **BK initialisation** — ``g`` is seeded with ``background_knowledge``
+       rather than an empty zero matrix, so known edges are present from the
+       start and influence the wait-list pruning immediately.
+    2. **BK-aware graph update** — :func:`update_graph_mpdag` is used instead
+       of :func:`update_graph`; it re-enforces required edges after each local
+       structure is merged (preventing CI-test errors from erasing known edges).
+    3. **Four-rule Meek** — :func:`meek_mpdag` is used instead of :func:`meek`;
+       the additional Rule 4 propagates orientations introduced by background-
+       knowledge edges that the three structural rules alone cannot deduce.
+
+    The wait-list pruning via :func:`reach_with_undirected` also benefits
+    from the BK initialisation: directed BK edges block undirected paths
+    earlier, reducing the number of MBs that need to be learned.
+
+    .. note::
+        Part of the **b-LOAD** algorithm introduced in this work.
+
+    Args:
+        data (np.ndarray): Data matrix of shape (n_samples, n_nodes).
+        ci_test (Callable[[int, int, list[int]], float]): CI test returning a
+            p-value given (X, Y, conditioning_set).
+        alpha (float): Significance level for CI tests.
+        target (int): Index of the node whose local network is to be learned.
+        background_knowledge (np.ndarray | None): Prior edge constraints in the
+            standard adjacency format (``bk[i,j] == -1`` and ``bk[j,i] == 1``
+            ↔ required edge i→j).  If ``None``, the function behaves
+            identically to :func:`mb_by_mb_alg`.
+        mb_algorithm (str): MB discovery algorithm — ``"grow_shrink"`` (default)
+            or ``"total_conditioning"``.
+        mb (dict[int, set] | None): Pre-computed Markov blankets; updated in
+            place.
+        L (dict[int, np.ndarray] | None): Pre-computed local structures;
+            updated in place.
+        sep_set (dict[frozenset, list] | None): Pre-computed separating sets;
+            updated in place.
+        ignore (Sequence[int]): Node indices excluded from all MB searches.
+
+    Returns:
+        np.ndarray: Learned local MPDAG ``g`` of shape (n_nodes, n_nodes),
+            consistent with ``background_knowledge`` and the CI-test evidence,
+            focused on the neighbourhood of ``target``.
     """
-    # Input
     if mb_algorithm == "grow_shrink":
         mb_algorithm = grow_shrink
     elif mb_algorithm == "total_conditioning":
@@ -585,33 +886,25 @@ def mb_by_mb_in_mpdag_alg(
     sep_set = sep_set or defaultdict(list)
     V = set(range(data.shape[1]))
 
-    # 1. Initialization
     done_list = set()
     wait_list = [target]
 
-    # ADAPTATION: Initialize with background knowledge if provided
+    # b-LOAD adaptation 1: seed g with background knowledge
     if background_knowledge is not None:
         g = background_knowledge.copy()
     else:
         g = np.zeros((len(V), len(V)), dtype=int)
 
-    # 2. Repeat
     while len(wait_list) > 0:
-        # Take a node x from the head of wait_list
         x = wait_list.pop(0)
 
-        # Find mb[x]
         if x not in mb:
             mb[x] = mb_algorithm(V.difference(set(ignore)), x, ci_test, alpha)
         mb_x = mb[x].union({x})
 
-        # Add [mb[x] \ done_list \ wait_list] to the tail of wait_list
         wait_list.extend([v for v in mb[x] if v not in list(done_list) + wait_list])
-
-        # Add x to done_list
         done_list.add(x)
 
-        # 3. Learn the local structure L[x] over mb+(x)
         if x in L:
             pass
         elif (
@@ -623,16 +916,14 @@ def mb_by_mb_in_mpdag_alg(
         else:
             L[x] = learn_local_structure(V, mb_x, sep_set, ci_test, alpha)
 
-        # 4. Put the edges connected to x and the v-structures containing x in L[x] to g
-        # ADAPTATION: Pass background_knowledge to protect known edges from being overwritten
+        # b-LOAD adaptation 2: BK-protected graph update
         g = update_graph_mpdag(g, x, L[x], background_knowledge)
 
-        # 5. Orient undirected edges in G
-        # ADAPTATION: Use the 4-rule MPDAG version of Meek
+        # b-LOAD adaptation 3: four-rule MPDAG Meek
         g = meek_mpdag(g, sep_set)
 
-        # 6. Remove all nodes from wait_list whose paths to target in g are blocked by directed edges.
-        # This naturally leverages the background knowledge to prune the wait_list faster.
+        # Wait-list pruning: BK edges block undirected paths earlier, so fewer
+        # MBs need to be learned when strong background knowledge is available.
         connected = reach_with_undirected(g, target)
         wait_list = [w for w in wait_list if w in connected]
 

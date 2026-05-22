@@ -1,13 +1,6 @@
 """
-Execution script for running PC baseline experiments.
-
-Sweeps over graph sizes (--observed) and reports F1 score and intervention
-distance, in the same format as the LOAD experiment scripts so results can
-be compared directly.
-
-Usage:
-    python run_experiments_pc.py --save_path results_pc.csv
-    python run_experiments_pc.py --observed 10 15 20 25 50 --n_exp 500 --save_path results_pc.csv
+This script runs experiments with the b-PC algorithm, augmented with globally sampled background knowledge.
+It evaluates its performance on various graph configurations.
 """
 
 import argparse
@@ -16,12 +9,12 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
-from src.running import run_experiment_pc_light
+from src.running import run_experiment_bpc_v2_light
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="Run PC baseline experiments",
+        description="Run PC+BK baseline experiments (global BK sampling)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -30,7 +23,7 @@ def parse_arguments():
         "--save_path", type=str, required=True, help="Path to save results CSV file"
     )
 
-    # Graph / data parameters (match the LOAD experiment defaults)
+    # Graph / data parameters (match LOAD experiment defaults)
     parser.add_argument("--exp_degree", type=float, default=2.0)
     parser.add_argument("--max_degree", type=int, default=5)
     parser.add_argument("--targets", type=int, default=2, help="Number of target nodes")
@@ -50,6 +43,19 @@ def parse_arguments():
         nargs="+",
         default=[10, 15, 20, 25, 50, 100],
         help="Graph sizes to sweep over",
+    )
+    parser.add_argument(
+        "--frac_req",
+        type=float,
+        nargs="+",
+        default=[0.2, 0.3, 0.4, 0.5],
+        help="Fraction of required edges to sweep over",
+    )
+    parser.add_argument(
+        "--frac_forb",
+        type=float,
+        default=0.0,
+        help="Fraction of forbidden edges (ignored, kept for interface compatibility)",
     )
 
     # Experiment control
@@ -77,39 +83,44 @@ def main():
         "save": args.save,
         "alpha": args.alpha,
         "ci_test": args.ci_test,
+        "fraction_forbidden": 0.0,
     }
 
     print("=" * 80)
-    print("PC Baseline Experiment Runner")
+    print("PC + Background Knowledge Experiment Runner  [global sampling]")
     print("=" * 80)
-    print(f"  Base seed : {args.base_seed}")
-    print(f"  N exp     : {args.n_exp}")
-    print(f"  Observed  : {args.observed}")
-    print(f"  Save path : {args.save_path}")
+    print(f"  Base seed      : {args.base_seed}")
+    print(f"  N exp          : {args.n_exp}")
+    print(f"  Observed       : {args.observed}")
+    print(f"  Fraction req   : {args.frac_req}")
+    print(f"  Save path      : {args.save_path}")
     print("=" * 80 + "\n")
 
     results_list = []
 
-    for observed in tqdm(args.observed, desc="Observed"):
-        base_args["observed"] = observed
-        print(f"\n  Running PC: observed={observed}")
+    for observed in tqdm(args.observed, desc="Observed", position=0):
+        for frac_req in tqdm(args.frac_req, desc="Frac req", leave=False, position=1):
+            base_args["observed"] = observed
+            base_args["fraction_required"] = frac_req
 
-        metrics = run_experiment_pc_light(base_args, args.base_seed, args.n_exp)
+            print(f"\n  Running PC+BK (global): observed={observed}, frac_req={frac_req}")
+            metrics = run_experiment_bpc_v2_light(base_args, args.base_seed, args.n_exp)
 
-        row = {
-            "algorithm": "pc",
-            "observed": observed,
-            "exp_degree": args.exp_degree,
-            "n_samples": args.samples_num,
-        }
-        for metric_key, stats in metrics.items():
-            row[f"{metric_key}_mean"] = stats["mean"]
-            row[f"{metric_key}_std"] = stats["std"]
+            row = {
+                "algorithm": "bpc_global",
+                "observed": observed,
+                "exp_degree": args.exp_degree,
+                "n_samples": args.samples_num,
+                "fraction_required": frac_req,
+                "fraction_forbidden": 0.0,
+            }
+            for metric_key, stats in metrics.items():
+                row[f"{metric_key}_mean"] = stats["mean"]
+                row[f"{metric_key}_std"] = stats["std"]
 
-        results_list.append(row)
-
-        pd.DataFrame(results_list).to_csv(args.save_path, index=False)
-        print(f"  Saved to {args.save_path}")
+            results_list.append(row)
+            pd.DataFrame(results_list).to_csv(args.save_path, index=False)
+            print(f"  Saved to {args.save_path}")
 
     print(f"\nDone. Results at: {args.save_path}")
 

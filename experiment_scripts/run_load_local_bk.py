@@ -1,11 +1,6 @@
 """
-Execution script for running LOAD in MPDAG experiments.
-
-Usage:
-    python run_experiments.py --targets 2 --alpha 0.01 --ci_test fisherz --save_path results.csv
-    
-    Or with custom parameters:
-    python run_experiments.py --targets 3 --samples_num 2000 --observed 10 15 20 --save_path /path/to/results.csv
+This script runs experiments comparing the LOAD and b-LOAD algorithms, augmented with globally sampled background knowledge.
+It evaluates their performance on various graph configurations.
 """
 
 import argparse
@@ -18,7 +13,7 @@ from src.running import run_algorithm_mpdag
 # Import or define your run_experiment_mpdag function
 # If it doesn't exist, we'll create a wrapper below
 try:
-    from src.running import run_experiment_mpdag_light
+    from src.running import run_experiment_mpdag_v2_light
 except ImportError:
     def run_experiment_mpdag(args, base_seed, n_exp):
         """
@@ -208,7 +203,7 @@ def main():
             
             # Run experiment
             print(f"\n  Running: observed={observed}, frac_req={frac_req}")
-            f1_dict = run_experiment_mpdag_light(base_args_skeleton, args.base_seed, args.n_exp)
+            f1_dict = run_experiment_mpdag_v2_light(base_args_skeleton, args.base_seed, args.n_exp)
             
             # Flatten the dictionary into a row
             row = {

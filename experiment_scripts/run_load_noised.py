@@ -1,11 +1,6 @@
 """
-Execution script for running LOAD in MPDAG experiments.
-
-Usage:
-    python run_experiments.py --targets 2 --alpha 0.01 --ci_test fisherz --save_path results.csv
-    
-    Or with custom parameters:
-    python run_experiments.py --targets 3 --samples_num 2000 --observed 10 15 20 --save_path /path/to/results.csv
+This script runs experiments comparing the LOAD and b-LOAD algorithms with noised background knowledge.
+It evaluates their performance on various graph configurations under noisy conditions.
 """
 
 import argparse

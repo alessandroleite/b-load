@@ -11,8 +11,13 @@ This repository provides the core implementation of the LOAD algorithm and its e
   - `background_knowledge.py`: Utilities for handling structural constraints.
   - `counting_ci_tests.py`: CI test wrappers with performance tracking.
   - `evaluation.py`: Metrics for validating discovered causal relations.
-- `run_experiments.py`: Main script for conducting simulations.
-- `run_experiments_v2.py`: Updated experiment pipeline with refined background knowledge sampling.
+- `experiment_scripts/`:
+  - `run_load_local_bk.py`: Runs LOAD vs b-LOAD with locally sampled background knowledge.
+  - `run_load_global_bk.py`: Runs LOAD vs b-LOAD with globally sampled background knowledge.
+  - `run_load_noised.py`: Runs LOAD with noised background knowledge.
+  - `run_pc.py`: Runs the PC algorithm.
+  - `run_bpc_local_bk.py`: Runs b-PC with locally sampled background knowledge.
+  - `run_bpc_global_bk.py`: Runs b-PC with globally sampled background knowledge.
 - `generate_data.R` / `evaluate.R`: R-based utilities for data synthesis and statistical comparison.
 
 ## Getting Started
@@ -23,9 +28,19 @@ pip install -r requirements.txt
 ```
 
 ### Running Experiments
-The public scripts provide the logic for synthetic data generation and algorithm execution. To run the standard experiment suite:
+The scripts in the `experiment_scripts/` directory allow for running experiments with different algorithms and background knowledge sampling strategies:
+
+- `run_load_local_bk.py`: Runs LOAD vs b-LOAD augmented with locally sampled background knowledge.
+- `run_load_global_bk.py`: Runs LOAD vs b-LOAD augmented with globally sampled background knowledge.
+- `run_load_noised.py`: Runs LOAD with noised background knowledge.
+- `run_pc.py`: Runs the PC algorithm.
+- `run_bpc_local_bk.py`: Runs b-PC augmented with locally sampled background knowledge.
+- `run_bpc_global_bk.py`: Runs b-PC augmented with globally sampled background knowledge.
+
+Example usage:
 ```bash
-python run_experiments.py [OPTIONS]
+python experiment_scripts/run_load_local_bk.py --save_path results.csv
+python experiment_scripts/run_pc.py --save_path results_pc.csv
 ```
 *Note: You may need to create a local directory (e.g., `experiment_runs/`) to store outputs, as these are ignored by version control.*
 

@@ -1,3 +1,29 @@
+"""
+running.py — Experiment runners for synthetic and real-data benchmarks.
+
+This module orchestrates the full experimental pipeline: data generation,
+background-knowledge sampling, algorithm execution, and evaluation.  Each
+runner encapsulates one experimental condition and returns a summary dict
+compatible with the aggregation utilities in ``src/analysis.py``.
+
+Two families of runners are provided:
+
+**b-LOAD / LOAD runners** (local and global BK variants):
+    ``run_algorithm_mpdag``, ``get_experiment_mpdag``, ``run_experiment_mpdag_light``
+    ``get_experiment_mpdag_v2``, ``run_experiment_mpdag_v2_light``
+    ``get_experiment_mpdag_real``, ``run_experiment_mpdag_real``
+    ``get_experiment_mpdag_noised``, ``run_experiment_mpdag_noised_light``
+
+**PC / b-PC runners** (baselines):
+    ``run_algorithm_pc``, ``get_experiment_pc``, ``run_experiment_pc_light``
+    ``run_algorithm_bpc``, ``get_experiment_bpc``, ``run_experiment_bpc_light``
+    ``get_experiment_bpc_v2``, ``run_experiment_bpc_v2_light``
+
+All ``run_experiment_*_light`` functions iterate over a list of experiment
+seeds and call their corresponding ``get_experiment_*`` function in a loop,
+collecting per-iteration results into summary statistics.
+"""
+
 from time import perf_counter
 
 import numpy as np
@@ -12,11 +38,20 @@ from src.background_knowledge import (
     sample_local_background_knowledge,
     sample_background_knowledge_v2,
     initialize_background_knowledge,
-    sample_local_background_knowledge_noised
+    sample_local_background_knowledge_noised,
 )
-from src.evaluation import get_true_osets, evaluate_oset, true_causal_effects, evaluate_intervention, get_true_osets_real_data
+from src.evaluation import (
+    get_true_osets,
+    evaluate_oset,
+    true_causal_effects,
+    evaluate_intervention,
+    get_true_osets_real_data,
+)
 
-### Sampling around target nodes only
+
+# ---------------------------------------------------------------------------
+# b-LOAD / LOAD — local BK sampling (edges incident on targets)
+# ---------------------------------------------------------------------------
 
 def run_algorithm_mpdag(
     id: str,
@@ -30,78 +65,123 @@ def run_algorithm_mpdag(
     cpt: dict | None = None,
     logging: bool = False,
     **kwargs,
-  ):
-  ci_test = CountingTest(data, ci_test, **kwargs)
+) -> dict:
+    """
+    Run a single LOAD or b-LOAD trial on one set of targets and return a result
+    dict augmented with timing, CI test counts, and metadata.
 
+    When ``with_b=True`` the b-LOAD algorithm (:func:`~src.load.load_in_mpdag`)
+    is used with the provided ``bg_knowledge`` matrix.  When ``with_b=False``
+    the base LOAD algorithm (:func:`~src.load.load`) is used.
 
-  start = perf_counter()
-  # Run algorithm
-  if with_b:
-      result = load_in_mpdag(
-          data=data,
-          ci_test=ci_test,
-          alpha=alpha,
-          targets=targets,
-          background_knowledge=bg_knowledge,
-          mb_algorithm="grow_shrink",
-          logging=logging,
-          **kwargs
-      )
-  else:
-      result = load(
-          data=data,
-          ci_test=ci_test,
-          alpha=alpha,
-          targets=targets,
-          mb_algorithm="grow_shrink",
-          logging=logging,
-          **kwargs
-      )
+    Part of the **b-LOAD** experimental pipeline.
 
-  result["time"] = perf_counter() - start
-  result["id"] = id
-  result["targets"] = targets
-  result["tests"] = ci_test.get_tests_per_order().tolist()
-  result["cpt"] = cpt
-  result["true_dag"] = true_dag
-  result["data"] = data
+    Args:
+        id (str): Unique experiment identifier stored in the result dict.
+        data (np.ndarray): Data matrix (n_samples × n_nodes).
+        targets (list[int]): ``[treatment, outcome]`` 0-based indices.
+        ci_test (str): CI test name for :class:`~src.counting_ci_tests.CountingTest`
+            (e.g. ``"fisherz"``).
+        alpha (float): Significance level.
+        with_b (bool): If ``True``, run b-LOAD; otherwise run base LOAD.
+        bg_knowledge (np.ndarray | None): Background-knowledge adjacency matrix
+            (only used when ``with_b=True``).
+        true_dag (nx.DiGraph | None): Ground-truth DAG stored in the result
+            (for downstream evaluation).
+        cpt: R CPT object stored in the result (for binary data evaluation).
+        logging (bool): Verbose progress logging.
+        **kwargs: Forwarded to the CI test constructor and algorithm.
 
-  return result
+    Returns:
+        dict: Algorithm result dict extended with ``"time"``, ``"id"``,
+            ``"targets"``, ``"tests"``, ``"cpt"``, ``"true_dag"``, ``"data"``.
+    """
+    ci_test = CountingTest(data, ci_test, **kwargs)
 
+    start = perf_counter()
+    if with_b:
+        result = load_in_mpdag(
+            data=data,
+            ci_test=ci_test,
+            alpha=alpha,
+            targets=targets,
+            background_knowledge=bg_knowledge,
+            mb_algorithm="grow_shrink",
+            logging=logging,
+            **kwargs,
+        )
+    else:
+        result = load(
+            data=data,
+            ci_test=ci_test,
+            alpha=alpha,
+            targets=targets,
+            mb_algorithm="grow_shrink",
+            logging=logging,
+            **kwargs,
+        )
 
-## Modification March 17th: using bg sampler v2 (around 4pm)
-## New modification March 17th: using local sampler again
+    result["time"] = perf_counter() - start
+    result["id"] = id
+    result["targets"] = targets
+    result["tests"] = ci_test.get_tests_per_order().tolist()
+    result["cpt"] = cpt
+    result["true_dag"] = true_dag
+    result["data"] = data
+
+    return result
 
 
 def get_experiment_mpdag(
-      seed: int,
-      observed: int,
-      exp_degree: float,
-      max_degree: int,
-      targets: int,
-      expl_anc: bool,
-      identifiable: bool,
-      min_adj_size: int,
-      samples_num,
-      discrete: bool,
-      save: bool,
-      with_b: bool,
-      logging: bool,
-      fraction_forbidden: float = 0.1,
-      fraction_required: float = 0.1,
-      alpha: float = 0.01,
-      ci_test: str = "fisherz",
-    ) -> dict:
+    seed: int,
+    observed: int,
+    exp_degree: float,
+    max_degree: int,
+    targets: int,
+    expl_anc: bool,
+    identifiable: bool,
+    min_adj_size: int,
+    samples_num: int,
+    discrete: bool,
+    save: bool,
+    with_b: bool,
+    logging: bool,
+    fraction_forbidden: float = 0.1,
+    fraction_required: float = 0.1,
+    alpha: float = 0.01,
+    ci_test: str = "fisherz",
+) -> dict:
     """
-    Run a single experiment with a specific seed.
+    Generate synthetic data for one seed and run LOAD or b-LOAD with local
+    background knowledge.
+
+    Background knowledge is sampled locally — only edges incident on the
+    treatment or outcome nodes are revealed — using
+    :func:`~src.background_knowledge.sample_local_background_knowledge`.
+
+    Part of the **b-LOAD** experimental pipeline.
 
     Args:
-        args (Namespace): The command line arguments.
-        done (dict): A dictionary of completed experiments.
-        s (int): The seed for the experiment.
+        seed (int): Random seed for data generation and BK sampling.
+        observed (int): Number of observed nodes.
+        exp_degree (float): Expected graph degree.
+        max_degree (int): Maximum node degree.
+        targets (int): Number of target pairs to sample.
+        expl_anc (bool): Require explicit ancestor–descendant target pair.
+        identifiable (bool): Require identifiable causal effect.
+        min_adj_size (int): Minimum true adjustment-set size.
+        samples_num (int): Number of i.i.d. observations.
+        discrete (bool): Use discrete (binary) data.
+        save (bool): Cache generated data to disk.
+        with_b (bool): Run b-LOAD (``True``) or base LOAD (``False``).
+        logging (bool): Verbose progress output.
+        fraction_forbidden (float): Fraction of non-edges to mark forbidden.
+        fraction_required (float): Fraction of true edges to reveal as required.
+        alpha (float): CI test significance level.
+        ci_test (str): CI test name (e.g. ``"fisherz"``).
 
     Returns:
-        dict: The result of the experiment.
+        dict: Result dict from :func:`run_algorithm_mpdag`.
     """
 
     # Generate the synthetic data
@@ -178,7 +258,26 @@ def run_experiment_mpdag(base_args, base_seed, n_exp):
 
 
 def run_experiment_mpdag_light(base_args, base_seed, n_exp):
-    # Lighter version that doesn't store all experiments in memory (only the final metrics), to save memory when running many experiments
+    """
+    Run ``n_exp`` paired LOAD / b-LOAD trials with local BK and return
+    aggregate summary statistics.
+
+    "Light" means only scalar metrics are kept in memory; full experiment
+    dicts are discarded after each iteration to reduce peak memory usage.
+
+    Part of the **b-LOAD** experimental pipeline.
+
+    Args:
+        base_args (dict): Keyword arguments forwarded to
+            :func:`get_experiment_mpdag` (excluding ``seed`` and ``with_b``).
+        base_seed (int): Starting seed; iteration ``s`` uses ``base_seed + s``.
+        n_exp (int): Number of independent trials.
+
+    Returns:
+        dict: Summary statistics with keys ``"f1_with_b"``, ``"f1_without_b"``,
+            ``"int_dist_with_b"``, ``"int_dist_without_b"``, each mapping to
+            a sub-dict with ``"mean"`` and ``"std"``.
+    """
 
     f1_with_b_list = []
     f1_without_b_list = []
@@ -217,38 +316,61 @@ def run_experiment_mpdag_light(base_args, base_seed, n_exp):
     }
 
 
-### V2: sampling around all nodes
+# ---------------------------------------------------------------------------
+# b-LOAD / LOAD — global BK sampling (all edges in the graph)
+# ---------------------------------------------------------------------------
 
 
 def get_experiment_mpdag_v2(
-      seed: int,
-      observed: int,
-      exp_degree: float,
-      max_degree: int,
-      targets: int,
-      expl_anc: bool,
-      identifiable: bool,
-      min_adj_size: int,
-      samples_num,
-      discrete: bool,
-      save: bool,
-      with_b: bool,
-      logging: bool,
-      fraction_forbidden: float = 0.1,
-      fraction_required: float = 0.1,
-      alpha: float = 0.01,
-      ci_test: str = "fisherz",
-    ) -> dict:
+    seed: int,
+    observed: int,
+    exp_degree: float,
+    max_degree: int,
+    targets: int,
+    expl_anc: bool,
+    identifiable: bool,
+    min_adj_size: int,
+    samples_num: int,
+    discrete: bool,
+    save: bool,
+    with_b: bool,
+    logging: bool,
+    fraction_forbidden: float = 0.1,
+    fraction_required: float = 0.1,
+    alpha: float = 0.01,
+    ci_test: str = "fisherz",
+) -> dict:
     """
-    Run a single experiment with a specific seed.
+    Generate synthetic data and run LOAD or b-LOAD with **global** background
+    knowledge (edges sampled from the entire graph, not just around targets).
+
+    Background knowledge is sampled using
+    :func:`~src.background_knowledge.sample_background_knowledge_v2`, which
+    draws required edges uniformly from all true edges in the DAG.
+
+    Part of the **b-LOAD** experimental pipeline.
 
     Args:
-        args (Namespace): The command line arguments.
-        done (dict): A dictionary of completed experiments.
-        s (int): The seed for the experiment.
+        seed (int): Random seed.
+        observed (int): Number of observed nodes.
+        exp_degree (float): Expected graph degree.
+        max_degree (int): Maximum node degree.
+        targets (int): Number of target pairs.
+        expl_anc (bool): Require explicit ancestor–descendant pair.
+        identifiable (bool): Require identifiable effect.
+        min_adj_size (int): Minimum adjustment-set size.
+        samples_num (int): Number of observations.
+        discrete (bool): Use discrete data.
+        save (bool): Cache data to disk.
+        with_b (bool): Run b-LOAD if ``True``, base LOAD if ``False``.
+        logging (bool): Verbose output.
+        fraction_forbidden (float): Fraction of non-edges to forbid.
+        fraction_required (float): Fraction of true edges to require.
+        alpha (float): CI test significance level.
+        ci_test (str): CI test name.
 
     Returns:
-        dict: The result of the experiment.
+        dict: Result dict from :func:`run_algorithm_mpdag`.
     """
 
     # Generate the synthetic data
@@ -368,29 +490,45 @@ def run_experiment_mpdag_v2_light(base_args, base_seed, n_exp):
 
 
 def get_experiment_mpdag_real(
-      data_name: str,
-      seed: int,
-      real_data: np.ndarray,
-      true_dag: nx.DiGraph,
-      targets: list[int],
-      observed: int,
-      with_b: bool,
-      fraction_forbidden: float = 0.1,
-      fraction_required: float = 0.1,
-      alpha: float = 0.01,
-      ci_test: str = "fisherz",
-      sampling_strategy: str = "local",
-    ) -> dict:
+    data_name: str,
+    seed: int,
+    real_data: np.ndarray,
+    true_dag: nx.DiGraph,
+    targets: list[int],
+    observed: int,
+    with_b: bool,
+    fraction_forbidden: float = 0.1,
+    fraction_required: float = 0.1,
+    alpha: float = 0.01,
+    ci_test: str = "fisherz",
+    sampling_strategy: str = "local",
+) -> dict:
     """
-    Run a single experiment with a specific seed.
+    Run a single LOAD or b-LOAD trial on real data for one target pair.
+
+    Background knowledge is sampled from the true DAG using either the local
+    strategy (edges incident on ``targets``) or the global strategy (all
+    edges), then converted to an adjacency matrix and passed to
+    :func:`run_algorithm_mpdag`.
+
+    Part of the **b-LOAD** experimental pipeline.
 
     Args:
-        args (Namespace): The command line arguments.
-        done (dict): A dictionary of completed experiments.
-        s (int): The seed for the experiment.
+        data_name (str): Dataset identifier used to build the experiment ID.
+        seed (int): Random seed for BK sampling.
+        real_data (np.ndarray): Observational data matrix (n_samples × n_nodes).
+        true_dag (nx.DiGraph): Ground-truth DAG for BK sampling.
+        targets (list[int]): ``[treatment, outcome]`` 0-based indices.
+        observed (int): Total number of nodes (columns of ``real_data``).
+        with_b (bool): Run b-LOAD if ``True``, base LOAD if ``False``.
+        fraction_forbidden (float): Fraction of non-edges to forbid.
+        fraction_required (float): Fraction of true edges to require.
+        alpha (float): CI test significance level.
+        ci_test (str): CI test name.
+        sampling_strategy (str): ``"local"`` or ``"global"``.
 
     Returns:
-        dict: The result of the experiment.
+        dict: Result dict from :func:`run_algorithm_mpdag`.
     """
 
 
@@ -695,7 +833,9 @@ def run_experiment_mpdag_noised_light(base_args, base_seed, n_exp):
         "int_dist_without_b": {"mean": int_dist_without_b.mean(), "std": int_dist_without_b.std()}
     }
 
-### PC baseline
+# ---------------------------------------------------------------------------
+# PC / b-PC baselines
+# ---------------------------------------------------------------------------
 
 
 def run_algorithm_pc(
@@ -843,7 +983,7 @@ def run_experiment_pc_light(base_args, base_seed, n_exp):
     }
 
 
-### PC with background knowledge (BPC)
+# b-PC (PC with background knowledge)
 
 
 def run_algorithm_bpc(

@@ -1,3 +1,33 @@
+"""
+pc.py — PC and b-PC global causal structure learning.
+
+Two algorithms are provided:
+
+1. **PC** — standard PC algorithm producing a CPDAG via skeleton search,
+   v-structure orientation, and three-rule Meek propagation.
+   Functions: ``_meek``, ``pc``.
+
+2. **b-PC** — PC extended with background knowledge, producing an MPDAG.
+   Required edges from the background-knowledge matrix are injected into the
+   CPDAG after the standard PC run, and a four-rule Meek procedure (R1–R3
+   structural + R4 using the sep-set) propagates the induced orientations.
+   Part of the b-LOAD algorithm introduced in this work.
+   Functions: ``_meek4``, ``pc_with_bk``.
+
+Graph encoding
+--------------
+``g[i, j] == -1``  →  tail at i  (i — j or i → j)
+``g[i, j] ==  1``  →  head at i  (j → i)
+``g[i, j] ==  0``  →  no edge
+
+An undirected edge i — j satisfies  g[i,j] == g[j,i] == -1.
+A directed edge  i → j satisfies    g[i,j] == -1  and  g[j,i] == 1.
+
+The final ``"amat"`` output follows a different convention (used by the
+evaluation code): ``amat[i][j] == 1`` indicates a tail at i (i.e., an edge
+from i toward j, directed or undirected).
+"""
+
 from collections import defaultdict
 from typing import Callable
 
@@ -6,18 +36,33 @@ import numpy as np
 from src.mb_by_mb import skeleton_step, v_struc_pc
 
 
+# ---------------------------------------------------------------------------
+# PC (base)
+# ---------------------------------------------------------------------------
+
+
 def _meek(pdag: np.ndarray) -> np.ndarray:
     """
-    Standard Meek orientation rules (R1-R3) for CPDAGs.
+    Apply the standard three-rule Meek orientation rules (R1–R3) to a PDAG.
 
-    Purely structural — fires on graph topology alone with no sep_set
-    conditioning, matching the original PC algorithm specification.
-    All matching patterns are oriented simultaneously per rule before
-    re-checking, as in the original vectorized implementation.
+    Rules operate on graph *structure alone* (no sep-set conditioning), which
+    matches the original PC algorithm specification.  All matching patterns are
+    oriented simultaneously per rule before re-checking (vectorised).
+
+    * **R1** — i → j — k, i not adjacent to k  ⟹  j → k
+    * **R2** — i → j → k — i  ⟹  i → k  (acyclicity)
+    * **R3** — i — k -/- j, i — l -/- j, k → i, l → i, i — j  ⟹  i → j
+
+    Args:
+        pdag (np.ndarray): Partially directed graph (copied internally; input
+            is not mutated).
+
+    Returns:
+        np.ndarray: CPDAG with all Meek-propagatable orientations resolved.
     """
 
     def rule1(pdag: np.ndarray) -> bool:
-        # i -> j - k, i not adjacent to k  =>  orient j -> k
+        """R1: i → j — k, i -/- k  ⟹  j → k."""
         i, j = np.where((pdag == -1) & (pdag.T == 1))  # i -> j
         k = np.where(
             ((pdag[j] == -1) & (pdag.T[j] == -1))  # j - k
@@ -28,7 +73,7 @@ def _meek(pdag: np.ndarray) -> np.ndarray:
         return len(i) > 0
 
     def rule2(pdag: np.ndarray) -> bool:
-        # i -> j -> k - i  =>  orient i -> k
+        """R2: i → j → k — i  ⟹  i → k  (closing a directed cycle)."""
         i, j = np.where((pdag == -1) & (pdag.T == 1))  # i -> j
         k = np.where(
             ((pdag[j] == -1) & (pdag.T[j] == 1))    # j -> k
@@ -39,9 +84,7 @@ def _meek(pdag: np.ndarray) -> np.ndarray:
         return len(i) > 0
 
     def rule3(pdag: np.ndarray) -> bool:
-        # i - j, k - i -/- j, l - i -/- j, k -> l ... wait:
-        # i - k -/- j, i - l -/- j, k -> i, l -> i  =>  orient i -> j
-        # (written as in orient.py: find i-j undirected, then k-i with k-/-j, etc.)
+        """R3: i — k -/- j, i — l -/- j, k → i, l → i, i — j  ⟹  i → j."""
         i, j = np.where((pdag == -1) & (pdag.T == -1))  # i - j
         k = np.where(
             ((pdag[i] == -1) & (pdag.T[i] == -1))  # k - i
@@ -65,20 +108,95 @@ def _meek(pdag: np.ndarray) -> np.ndarray:
     return pdag
 
 
+def pc(
+    data: np.ndarray,
+    ci_test: Callable[[int, int, list[int]], float],
+    alpha: float,
+    **kwargs,
+) -> dict:
+    """
+    PC algorithm for global causal structure learning.
+
+    Learns a CPDAG (completed partially directed acyclic graph) representing
+    the Markov equivalence class of the underlying DAG.
+
+    Pipeline:
+
+    1. **Skeleton search**: iteratively remove edges using CI tests (growing
+       conditioning-set size).
+    2. **V-structure orientation**: orient unshielded colliders from the
+       skeleton and separating sets.
+    3. **Meek propagation**: apply three-rule Meek (R1–R3) to orient as many
+       remaining edges as possible.
+
+    Args:
+        data (np.ndarray): Data matrix of shape (n_samples, n_nodes).
+        ci_test (Callable[[int, int, list[int]], float]): CI test returning a
+            p-value given (X, Y, conditioning_set).
+        alpha (float): Significance level — edges whose CI test p-value ≥
+            alpha are removed from the skeleton.
+        **kwargs: Additional keyword arguments are silently ignored (for
+            interface compatibility).
+
+    Returns:
+        dict with key ``"amat"``: CPDAG adjacency matrix as a nested list.
+            ``amat[i][j] == 1`` means there is an edge with tail at i
+            (i → j for a directed edge, or i — j for undirected).
+            Undirected edges satisfy ``amat[i][j] == amat[j][i] == 1``.
+    """
+    n = data.shape[1]
+    skeleton = np.full((n, n), -1, dtype=int)
+    np.fill_diagonal(skeleton, 0)
+    sep_set = defaultdict(list)
+
+    order = 0
+    while np.amax(np.sum(skeleton != 0, axis=1)) > order:
+        skeleton = skeleton_step(order, skeleton, ci_test, alpha, sep_set)
+        order += 1
+
+    pdag = v_struc_pc(skeleton, sep_set)
+    cpdag = _meek(pdag)
+
+    # Convert internal encoding (tail at i = -1) to output encoding (tail at i = 1)
+    amat = np.zeros((n, n), dtype=int)
+    amat[cpdag == -1] = 1
+    return {"amat": amat.tolist()}
+
+
+# ---------------------------------------------------------------------------
+# b-PC — background-knowledge extension (part of the b-LOAD algorithm)
+# ---------------------------------------------------------------------------
+
+
 def _meek4(pdag: np.ndarray, sep_set: dict) -> np.ndarray:
     """
-    4-rule Meek for PC with background knowledge.
+    Four-rule Meek for b-PC: R1–R3 structural rules plus R4 using the sep-set.
 
-    R1-R3 are the same purely structural rules as _meek.
-    R4 additionally uses the sep_set from PC's global skeleton search:
-    for undirected a-b, if a-c, b->c, a-d, d->c, b not adjacent to d,
-    and a is in every Sep(b,d), orient a->b.
+    R1–R3 are the same purely structural rules as :func:`_meek`.
+    R4 additionally consults the sep-set from the PC skeleton search:
 
-    This propagates orientations introduced by injected required edges
-    that R1-R3 alone cannot deduce from graph structure.
+    * **R4** — undirected a — b; a — c (undir), b → c; a — d (undir), d → c;
+      b not adjacent to d; and a in every Sep(b, d)  ⟹  orient a → b.
+
+    R4 propagates orientations introduced by injected background-knowledge
+    edges that R1–R3 alone cannot deduce from graph topology.
+
+    .. note::
+        Part of the **b-LOAD / b-PC** algorithm introduced in this work.
+
+    Args:
+        pdag (np.ndarray): Partially directed graph (copied internally).
+        sep_set (dict): Separating sets from the skeleton search, keyed by
+            ``frozenset({i, k})``.  Each value is a list of conditioning sets
+            that d-separated i and k.
+
+    Returns:
+        np.ndarray: Graph with all four-rule Meek propagatable orientations
+            resolved.
     """
 
     def rule1(pdag: np.ndarray) -> bool:
+        """R1: i → j — k, i -/- k  ⟹  j → k."""
         i, j = np.where((pdag == -1) & (pdag.T == 1))
         k = np.where(
             ((pdag[j] == -1) & (pdag.T[j] == -1))
@@ -89,6 +207,7 @@ def _meek4(pdag: np.ndarray, sep_set: dict) -> np.ndarray:
         return len(i) > 0
 
     def rule2(pdag: np.ndarray) -> bool:
+        """R2: i → j → k — i  ⟹  i → k."""
         i, j = np.where((pdag == -1) & (pdag.T == 1))
         k = np.where(
             ((pdag[j] == -1) & (pdag.T[j] == 1))
@@ -99,6 +218,7 @@ def _meek4(pdag: np.ndarray, sep_set: dict) -> np.ndarray:
         return len(i) > 0
 
     def rule3(pdag: np.ndarray) -> bool:
+        """R3: i — k -/- j, i — l -/- j, k → i, l → i, i — j  ⟹  i → j."""
         i, j = np.where((pdag == -1) & (pdag.T == -1))
         k = np.where(
             ((pdag[i] == -1) & (pdag.T[i] == -1))
@@ -117,12 +237,14 @@ def _meek4(pdag: np.ndarray, sep_set: dict) -> np.ndarray:
         return len(i) > 0
 
     def rule4(pdag: np.ndarray, sep_set: dict) -> bool:
-        # For undirected a-b: if a-c (undirected), b->c (directed),
-        # a-d (undirected), d->c (directed), b not adjacent to d,
-        # and a in every Sep(b,d) => orient a->b.
-        # Uses sep_set from skeleton search to certify a is non-collider
-        # between b and d, making a->b the only orientation that avoids
-        # a new unshielded collider.
+        """
+        R4: a — b (undir); a — c (undir), b → c; a — d (undir), d → c;
+            b -/- d; a ∈ Sep(b, d)  ⟹  a → b.
+
+        a being in every Sep(b, d) certifies it is a non-collider on
+        b — a — d, so the only consistent orientation of a — b is a → b.
+        This handles BK-induced directed edges that R1–R3 cannot propagate.
+        """
         a, b = np.where((pdag == -1) & (pdag.T == -1))
         changed = False
         for a_, b_ in zip(a, b):
@@ -153,45 +275,6 @@ def _meek4(pdag: np.ndarray, sep_set: dict) -> np.ndarray:
     return pdag
 
 
-def pc(
-    data: np.ndarray,
-    ci_test: Callable[[int, int, list[int]], float],
-    alpha: float,
-    **kwargs,
-) -> dict:
-    """
-    PC algorithm for global causal structure learning.
-
-    Args:
-        data (np.ndarray): The data matrix (n_samples x n_nodes).
-        ci_test (Callable): CI test returning a p-value given (X, Y, conditioning_set).
-        alpha (float): Significance level.
-
-    Returns:
-        dict with 'amat': CPDAG adjacency matrix as nested list.
-            amat[i][j] == 1 means there is an edge with tail at i
-            (i.e. i->j for a directed edge, or i-j for undirected).
-            Undirected edges satisfy amat[i][j] == amat[j][i] == 1.
-    """
-    n = data.shape[1]
-    skeleton = np.full((n, n), -1, dtype=int)
-    np.fill_diagonal(skeleton, 0)
-    sep_set = defaultdict(list)
-
-    order = 0
-    while np.amax(np.sum(skeleton != 0, axis=1)) > order:
-        skeleton = skeleton_step(order, skeleton, ci_test, alpha, sep_set)
-        order += 1
-
-    pdag = v_struc_pc(skeleton, sep_set)
-    cpdag = _meek(pdag)
-
-    # cpdag[i,j]==-1 means tail at i (edge exists out of i toward j)
-    amat = np.zeros((n, n), dtype=int)
-    amat[cpdag == -1] = 1
-    return {"amat": amat.tolist()}
-
-
 def pc_with_bk(
     data: np.ndarray,
     ci_test: Callable[[int, int, list[int]], float],
@@ -200,28 +283,35 @@ def pc_with_bk(
     **kwargs,
 ) -> dict:
     """
-    PC algorithm with required background-knowledge edges injected after the
-    initial CPDAG is built, then propagated with 4-rule Meek.
+    b-PC: PC algorithm with background-knowledge injection and four-rule Meek.
 
-    Pipeline:
-      1. Standard PC: skeleton search + v-structure orientation + 3-rule Meek
-      2. Overlay required edges from background_knowledge onto the CPDAG
-      3. 4-rule Meek (R1-R3 structural + R4 with sep_set) to propagate BK
+    Extends the standard :func:`pc` pipeline with two additional steps:
 
-    Forbidden edges in background_knowledge are ignored; only required edges
-    (non-zero entries in the matrix) are injected.
+    1. After the CPDAG is built by standard PC, **required edges** from
+       ``background_knowledge`` are overlaid directly onto the CPDAG.
+    2. A **four-rule Meek** sweep (R1–R3 structural + R4 with sep-set) is run
+       to propagate orientations induced by the injected edges.
+
+    Forbidden edges in ``background_knowledge`` are ignored; only required
+    edges (non-zero entries in the matrix) are injected.
+
+    .. note::
+        Part of the **b-LOAD / b-PC** algorithm introduced in this work.
 
     Args:
-        data (np.ndarray): Data matrix (n_samples x n_nodes).
-        ci_test (Callable): CI test returning a p-value.
+        data (np.ndarray): Data matrix of shape (n_samples, n_nodes).
+        ci_test (Callable[[int, int, list[int]], float]): CI test returning a
+            p-value given (X, Y, conditioning_set).
         alpha (float): Significance level.
         background_knowledge (np.ndarray | None): Adjacency matrix where
-            bk[i,j]==-1 and bk[j,i]==1 encodes the required edge i->j.
-            If None, behaves identically to pc().
+            ``bk[i,j] == -1`` and ``bk[j,i] == 1`` encodes the required
+            directed edge i → j.  If ``None``, the function behaves
+            identically to :func:`pc`.
+        **kwargs: Additional keyword arguments are silently ignored.
 
     Returns:
-        dict with 'amat': CPDAG adjacency matrix as nested list (same
-        convention as pc()).
+        dict with key ``"amat"``: MPDAG adjacency matrix as a nested list
+            (same convention as :func:`pc`).
     """
     n = data.shape[1]
     skeleton = np.full((n, n), -1, dtype=int)
@@ -235,15 +325,15 @@ def pc_with_bk(
 
     pdag = v_struc_pc(skeleton, sep_set)
 
-    # First Meek sweep: 3 structural rules, standard PC
+    # Standard three-rule Meek (PC step)
     cpdag = _meek(pdag)
 
-    # Inject required edges from background knowledge
+    # Inject required background-knowledge edges
     if background_knowledge is not None:
         mask = background_knowledge != 0
         cpdag[mask] = background_knowledge[mask]
 
-    # Second Meek sweep: all 4 rules, R4 uses sep_set to propagate BK
+    # Four-rule Meek to propagate BK-induced orientations
     cpdag = _meek4(cpdag, sep_set)
 
     amat = np.zeros((n, n), dtype=int)

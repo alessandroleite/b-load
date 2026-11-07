@@ -1,7 +1,7 @@
 <h1 align="center">b-LOAD: Background-Knowledge-Augmented Local Causal Discovery
 </h1>
 
-<p align="center">
+<p>
 <strong>b-Load</strong> is a knowledge-informed extension of the Local Ordering-based Ancestral Discovery (LOAD) algorithm for local causal discovery of optimal adjustment sets. It integrates prior edge constraints into local structure learning and dynamically expands the discovery frontier using Meek's rules, producing knowledge-constrained maximal partially directed acyclic graphs. By leveraging background knowledge, <strong>b-Load</strong> reduces structural uncertainty and enables the identification of adjustment sets that may not be identifiable from observational data alone. The method improves causal effect estimation, particularly in data-scarce and structurally complex settings, while maintaining scalability and robustness to moderate noise in prior knowledge.
 </p>
 
@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="https://doi.org/10.1145/3799682.3840893"><img alt="DOI" src="https://img.shields.io/badge/DOI-10.1145%2F3799682.3840893-1f6feb"></a>
-  <a href="https://pypi.org/project/b-load/"><img alt="PyPI" src="https://img.shields.io/badge/pyversion-b-load-blue"></a>
+  <a href="https://pypi.org/project/b-load/"><img alt="PyPI" src="https://img.shields.io/pypi/v/b-load"></a>
   <a href="https://pypi.org/project/b-load/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/b-load"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green"></a>
 </p>

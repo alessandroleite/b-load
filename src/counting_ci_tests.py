@@ -9,6 +9,7 @@ algorithm run, broken down by conditioning-set order.
 """
 
 from collections import defaultdict
+from typing import Optional
 
 import numpy as np
 from causallearn.utils.cit import CIT
@@ -55,7 +56,7 @@ class CountingTest:
         self,
         X: int,
         Y: int,
-        condition_set: list[int] | None = [],
+        condition_set: Optional[list[int]] = [],
         *args,
         **kwargs,
     ) -> float:
@@ -66,7 +67,7 @@ class CountingTest:
         Args:
             X (int): Index of the first variable.
             Y (int): Index of the second variable.
-            condition_set (list[int] | None): Indices of the conditioning
+            condition_set (Optional[list[int]]): Indices of the conditioning
                 variables.  ``None`` is treated as the empty set.
 
         Returns:

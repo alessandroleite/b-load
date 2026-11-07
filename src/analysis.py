@@ -29,7 +29,7 @@ import glob
 import os
 import re
 from collections import defaultdict
-from typing import Sequence
+from typing import Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -491,7 +491,7 @@ def plot_f1(
     df_bload_global: pd.DataFrame,
     df_load_no_bk: pd.DataFrame,
     target_fracs: Sequence[float] = (0.2, 0.4, 0.6, 0.8),
-    save_path: str | None = None,
+    save_path: Optional[str] = None,
 ) -> plt.Figure:
     """Plot F1 scores for all six methods as a 2 × 2 grid over BK fractions.
 
@@ -591,10 +591,10 @@ def plot_intervention_distance(
     df_bload_global: pd.DataFrame,
     exp_degree: float = 2.0,
     frac: float = 0.3,
-    d_panels_a: Sequence[int] | None = None,
+    d_panels_a: Optional[Sequence[int]] = None,
     n_panels_bc: Sequence[int] = (100, 1000, 5000, 10000),
     d_panel_b: int = 10,
-    save_prefix: str | None = None,
+    save_prefix: Optional[str] = None,
 ) -> tuple[plt.Figure, plt.Figure, plt.Figure]:
     """Produce three intervention-distance figures for all six methods.
 

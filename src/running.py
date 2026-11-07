@@ -60,9 +60,9 @@ def run_algorithm_mpdag(
     ci_test: str,
     alpha: float,
     with_b: bool = False,
-    bg_knowledge: dict | None = None,
-    true_dag: nx.DiGraph | None = None,
-    cpt: dict | None = None,
+    bg_knowledge: Optional[dict] = None,
+    true_dag: nx.Optional[DiGraph] = None,
+    cpt: Optional[dict] = None,
     logging: bool = False,
     **kwargs,
 ) -> dict:
@@ -84,9 +84,9 @@ def run_algorithm_mpdag(
             (e.g. ``"fisherz"``).
         alpha (float): Significance level.
         with_b (bool): If ``True``, run b-LOAD; otherwise run base LOAD.
-        bg_knowledge (np.ndarray | None): Background-knowledge adjacency matrix
+        bg_knowledge (np.Optional[ndarray]): Background-knowledge adjacency matrix
             (only used when ``with_b=True``).
-        true_dag (nx.DiGraph | None): Ground-truth DAG stored in the result
+        true_dag (nx.Optional[DiGraph]): Ground-truth DAG stored in the result
             (for downstream evaluation).
         cpt: R CPT object stored in the result (for binary data evaluation).
         logging (bool): Verbose progress logging.
@@ -844,8 +844,8 @@ def run_algorithm_pc(
     targets: list[int],
     ci_test: str,
     alpha: float,
-    true_dag: nx.DiGraph | None = None,
-    cpt: dict | None = None,
+    true_dag: nx.Optional[DiGraph] = None,
+    cpt: Optional[dict] = None,
     **kwargs,
 ) -> dict:
     """
@@ -992,9 +992,9 @@ def run_algorithm_bpc(
     targets: list[int],
     ci_test: str,
     alpha: float,
-    bg_knowledge: np.ndarray | None = None,
-    true_dag: nx.DiGraph | None = None,
-    cpt: dict | None = None,
+    bg_knowledge: np.Optional[ndarray] = None,
+    true_dag: nx.Optional[DiGraph] = None,
+    cpt: Optional[dict] = None,
     **kwargs,
 ) -> dict:
     """
@@ -1002,7 +1002,7 @@ def run_algorithm_bpc(
     with evaluate_oset and evaluate_intervention.
 
     Args:
-        bg_knowledge (np.ndarray | None): Required-edge matrix from
+        bg_knowledge (np.Optional[ndarray]): Required-edge matrix from
             initialize_background_knowledge. Passed directly to pc_with_bk.
         **kwargs: Extra fields from generate_data forwarded to CountingTest.
 

@@ -87,7 +87,7 @@ def get_optimal_adj_set(amat: np.ndarray, treatment: int, outcome: int):
         outcome (int): 0-based index of the outcome variable.
 
     Returns:
-        set[int] | None: The optimal adjustment set as a set of 0-based node
+        Optional[set[int]]: The optimal adjustment set as a set of 0-based node
             indices, or ``None`` if the effect is not identifiable.
     """
     if not is_ancestor(treatment, outcome, amat):
@@ -123,7 +123,7 @@ def get_true_osets(experiments: dict) -> dict:
 
             * ``"treatment"`` (int): 0-based treatment index.
             * ``"outcome"`` (int): 0-based outcome index.
-            * ``"oset"`` (set[int] | None): True optimal adjustment set, or
+            * ``"oset"`` (Optional[set[int]]): True optimal adjustment set, or
               ``None`` if not identifiable from the CPDAG.
     """
     true_osets = {}
@@ -329,7 +329,7 @@ def get_true_osets_real_data(experiments: dict) -> dict:
 
             * ``"treatment"`` (int): 0-based treatment index.
             * ``"outcome"`` (int): 0-based outcome index.
-            * ``"oset"`` (set[int] | None): True optimal adjustment set from
+            * ``"oset"`` (Optional[set[int]]): True optimal adjustment set from
               the true DAG, or ``None`` if not identifiable.
     """
     true_osets = {}

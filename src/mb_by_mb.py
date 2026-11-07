@@ -29,7 +29,7 @@ A directed edge  i → j satisfies    g[i,j] == -1  and  g[j,i] == 1.
 
 from collections import defaultdict
 from itertools import chain, combinations
-from typing import Callable, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
@@ -530,9 +530,9 @@ def mb_by_mb_alg(
     alpha: float,
     target: int,
     mb_algorithm: str = "grow_shrink",
-    mb: dict[int, set] | None = None,
-    L: dict[int, np.ndarray] | None = None,
-    sep_set: dict[frozenset, list] | None = None,
+    mb: Optional[dict[int, set]] = None,
+    L: Optional[dict[int, np.ndarray]] = None,
+    sep_set: Optional[dict[frozenset, list]] = None,
     ignore: Sequence[int] = [],
 ) -> np.ndarray:
     """
@@ -566,11 +566,11 @@ def mb_by_mb_alg(
         target (int): Index of the node whose local network is to be learned.
         mb_algorithm (str): MB discovery algorithm — ``"grow_shrink"`` (default)
             or ``"total_conditioning"``.
-        mb (dict[int, set] | None): Pre-computed Markov blankets; updated in
+        mb (Optional[dict[int, set]]): Pre-computed Markov blankets; updated in
             place and reused across calls.
-        L (dict[int, np.ndarray] | None): Pre-computed local structures;
+        L (Optional[dict[int, np.ndarray]]): Pre-computed local structures;
             updated in place.
-        sep_set (dict[frozenset, list] | None): Pre-computed separating sets;
+        sep_set (Optional[dict[frozenset, list]]): Pre-computed separating sets;
             updated in place.
         ignore (Sequence[int]): Node indices to exclude from all MB searches
             (e.g. intervention targets).
@@ -634,7 +634,7 @@ def update_graph_mpdag(
     g: np.ndarray,
     target: int,
     local: np.ndarray,
-    background_knowledge: np.ndarray | None = None,
+    background_knowledge: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Merge the local structure ``local`` for ``target`` into the global MPDAG
@@ -664,7 +664,7 @@ def update_graph_mpdag(
         target (int): Node whose local neighbourhood is being merged.
         local (np.ndarray): Local PDAG over mb⁺(target) (same index space
             as ``g``).
-        background_knowledge (np.ndarray | None): Prior edge constraints
+        background_knowledge (np.Optional[ndarray]): Prior edge constraints
             encoded in the standard adjacency format
             (``bk[i,j] == -1`` and ``bk[j,i] == 1``  ↔  required edge i→j).
             If ``None``, the function behaves identically to
@@ -819,11 +819,11 @@ def mb_by_mb_in_mpdag_alg(
     ci_test: Callable[[int, int, list[int]], float],
     alpha: float,
     target: int,
-    background_knowledge: np.ndarray | None = None,
+    background_knowledge: Optional[np.ndarray] = None,
     mb_algorithm: str = "grow_shrink",
-    mb: dict[int, set] | None = None,
-    L: dict[int, np.ndarray] | None = None,
-    sep_set: dict[frozenset, list] | None = None,
+    mb: Optional[dict[int, set]] = None,
+    L: Optional[dict[int, np.ndarray]] = None,
+    sep_set: Optional[dict[frozenset, list]] = None,
     ignore: Sequence[int] = [],
 ) -> np.ndarray:
     """
@@ -855,17 +855,17 @@ def mb_by_mb_in_mpdag_alg(
             p-value given (X, Y, conditioning_set).
         alpha (float): Significance level for CI tests.
         target (int): Index of the node whose local network is to be learned.
-        background_knowledge (np.ndarray | None): Prior edge constraints in the
+        background_knowledge (np.Optional[ndarray]): Prior edge constraints in the
             standard adjacency format (``bk[i,j] == -1`` and ``bk[j,i] == 1``
             ↔ required edge i→j).  If ``None``, the function behaves
             identically to :func:`mb_by_mb_alg`.
         mb_algorithm (str): MB discovery algorithm — ``"grow_shrink"`` (default)
             or ``"total_conditioning"``.
-        mb (dict[int, set] | None): Pre-computed Markov blankets; updated in
+        mb (Optional[dict[int, set]]): Pre-computed Markov blankets; updated in
             place.
-        L (dict[int, np.ndarray] | None): Pre-computed local structures;
+        L (Optional[dict[int, np.ndarray]]): Pre-computed local structures;
             updated in place.
-        sep_set (dict[frozenset, list] | None): Pre-computed separating sets;
+        sep_set (Optional[dict[frozenset, list]]): Pre-computed separating sets;
             updated in place.
         ignore (Sequence[int]): Node indices excluded from all MB searches.
 

@@ -22,7 +22,7 @@ edges.
 
 import math
 import random
-from typing import Any
+from typing import Any, Optional
 
 import networkx as nx
 import numpy as np

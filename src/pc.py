@@ -29,7 +29,7 @@ from i toward j, directed or undirected).
 """
 
 from collections import defaultdict
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -279,7 +279,7 @@ def pc_with_bk(
     data: np.ndarray,
     ci_test: Callable[[int, int, list[int]], float],
     alpha: float,
-    background_knowledge: np.ndarray | None = None,
+    background_knowledge: Optional[np.ndarray] = None,
     **kwargs,
 ) -> dict:
     """
@@ -303,7 +303,7 @@ def pc_with_bk(
         ci_test (Callable[[int, int, list[int]], float]): CI test returning a
             p-value given (X, Y, conditioning_set).
         alpha (float): Significance level.
-        background_knowledge (np.ndarray | None): Adjacency matrix where
+        background_knowledge (np.Optional[ndarray]): Adjacency matrix where
             ``bk[i,j] == -1`` and ``bk[j,i] == 1`` encodes the required
             directed edge i → j.  If ``None``, the function behaves
             identically to :func:`pc`.

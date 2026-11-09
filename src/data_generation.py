@@ -74,7 +74,7 @@ def generate_data(
     samples_num: int = 0,
     discrete: bool = False,
     max_classes: int = 2,
-    file: str | None = None,
+    file: Optional[str] = None,
     save: bool = True,
 ) -> dict:
     """
@@ -103,7 +103,7 @@ def generate_data(
             data instead of continuous Gaussian data.
         max_classes (int): Maximum number of categories per discrete variable
             (only used when ``discrete=True``).
-        file (str | None): Path to an existing R model file.  When provided,
+        file (Optional[str]): Path to an existing R model file.  When provided,
             the graph structure is loaded from that file and only new samples
             are drawn (``generate_data_from_file`` is called).
         save (bool): If ``True``, cache the generated dataset to disk.

@@ -28,7 +28,7 @@ A directed edge  i → j satisfies    g[i,j] == -1  and  g[j,i] == 1.
 
 from collections import defaultdict
 from itertools import chain, combinations
-from typing import Callable, NamedTuple, Sequence
+from typing import Callable, NamedTuple, Optional, Sequence
 
 import numpy as np
 
@@ -406,7 +406,7 @@ def load_in_mpdag(
     ci_test: Callable[[int, int, Sequence[int]], float],
     alpha: float,
     targets: Sequence[int],
-    background_knowledge: np.ndarray | None = None,
+    background_knowledge: Optional[np.ndarray] = None,
     mb_algorithm: str = "grow_shrink",
     ignore: Sequence[int] = [],
     logging: bool = False,
@@ -442,7 +442,7 @@ def load_in_mpdag(
         alpha (float): Significance level for CI tests.
         targets (Sequence[int]): Pair of node indices ``[t1, t2]`` whose causal
             effect is to be estimated.
-        background_knowledge (np.ndarray | None): Prior edge constraints in the
+        background_knowledge (np.Optional[ndarray]): Prior edge constraints in the
             standard adjacency format (``bk[i,j] == -1`` and ``bk[j,i] == 1``
             ↔ required edge i→j).  If ``None``, the function behaves
             identically to :func:`load`.
